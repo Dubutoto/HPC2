@@ -86,8 +86,6 @@ typedef struct
 {
 int size;
 int rank;                            
-int local_rows;
-int local_cols;
 int halo_first;
 int halo_last;
 // int tmpX;
@@ -199,13 +197,13 @@ int main(int argc, char* argv[])
   MPI_Comm_rank(MPI_COMM_WORLD, &rank_data.rank);
 
 
-  MPI_Datatype type = {MPI_FLOAT};
+  MPI_Datatype this_type = {MPI_FLOAT};
   const MPI_Aint offset = {
       offsetof(t_speed,speeds)
   };
 
 
-  MPI_Type_create_struct(item,&tmp_lengths,&offset,&type,&cells_struct);
+  MPI_Type_create_struct(item,&tmp_lengths,&offset,&this_type,&cells_struct);
   MPI_Type_commit(&cells_struct);
 
   gettimeofday(&timstr, NULL);
@@ -213,23 +211,23 @@ int main(int argc, char* argv[])
   init_tic=tot_tic;
   initialise(paramfile, obstaclefile, &params, &cells, &tmp_cells, &obstacles, &av_vels);
 
-  for (int ii = 0; ii < params.ny; ii++)
+  for (int jj = 0; jj < params.ny; jj++)
   {
-    for (int jj = 0; jj < params.nx; jj++)
+    for (int ii = 0; ii < params.nx; ii++)
     {
-      if(!obstacles[jj + ii*params.nx]){
+      if(!obstacles[ii + jj*params.nx]){
            rank_data.count_cells +=1;
       }
     }
   }
 
 
-  if (rank_data.rank == MASTER) {
+  
     /* Init time stops here, compute time starts*/
     gettimeofday(&timstr, NULL);
     init_toc = timstr.tv_sec + (timstr.tv_usec / 1000000.0);
     comp_tic = init_toc;
-  }
+  // }
 
   numberOfIterations = 0;
 
@@ -306,67 +304,74 @@ float calculate_av(const t_param params,  t_speed *cells, int* obstacles){
     MPI_Reduce(&local_av, &total_sum, 1, MPI_FLOAT, MPI_SUM, 0, MPI_COMM_WORLD);
 
     if (rank_data.rank == MASTER) {
-        float overall_av = total_sum / (float) rank_data.count_cells;  
-       // printf("Total average velocity after reduction: %.12E\n", overall_av);
-        return overall_av;
+         total_sum = (total_sum / (float) rank_data.count_cells);  
+       
+       local_av = total_sum;
+        return total_sum;
     }
 
-    // printf("Local average velocity for worker %d: %.12E\n", rank_data.rank, local_av / rank_data.count_cells);
-    return local_av / rank_data.count_cells;
+   
+    return (local_av / rank_data.count_cells);
 }
 
-int get_upper_limits(int rank){
+int get_lower_limits(int rank){
     int offset = floor(rank_data.tmpY/rank_data.size);
-    int higherLim;
-    
-    if(rank == 0){
-        higherLim = offset+1;
-        // printf("Returned values for rank %d from getLimitsFromRank \n",rank);
-        return higherLim;
+    int lowerLim;
+    if(rank_data.rank == 0){
+        lowerLim = offset+1;
+        return lowerLim;
     }
-    if(rank == rank_data.size-1){
-        higherLim = rank_data.tmpY;
-        // printf("Returned values for rank %d from getLimitsFromRank \n",rank);
-        return higherLim;
+    if(rank_data.rank == rank_data.size-1){
+        lowerLim = rank_data.tmpY;
+        return lowerLim;
     }
     else{
-        //lowerLim = (rank * offset) +1; which is why the bottom is this
-        higherLim = ((rank * offset) + 1) + offset + 1;
-        // printf("Returned values for rank %d from getLimitsFromRank \n",rank);
-        return higherLim;
+        lowerLim = ((rank_data.rank * offset) + 1) + offset + 1;
+        return lowerLim;
     }
 }
 
-int get_lower_limits(int rank) {
+int get_upper_limits(int rank) {
     int offset = floor(rank_data.tmpY / rank_data.size);
-    int lowerLim;
+    int upperLim;
 
-    if (rank == 0) {
-        lowerLim = 0;
-    } else if (rank == rank_data.size - 1) {
-        lowerLim = (offset * rank) + 1;
+    if (rank_data.rank == 0) {
+        upperLim = 0;
+    } else if (rank_data.rank == rank_data.size - 1) {
+        upperLim = (offset * rank) + 1;
     } else {
-        lowerLim = (rank * offset) + 1;
+        upperLim = (rank * offset) + 1;
     }
 
-    return lowerLim;
+    return upperLim;
 }
 
-void collateData(const t_param params, t_speed* cells, t_speed* tmp_cells, int* obstacles) {
-    if (rank_data.rank == MASTER) {
-        for (int i = 1; i < rank_data.size; ++i) {
-            int start = get_lower_limits(i);
-            int end = get_upper_limits(i);
-            int size = params.nx * (end - start);
+void collateData(const t_param params, t_speed* cells, t_speed* tmp_cells, int* obstacles){
+    if(rank_data.rank == MASTER){
+        // printf("Gathering data \n");
+        for(int i = 1; i < rank_data.size; i ++){
 
-            MPI_Recv(&cells[start * params.nx], size, cells_struct, i, 1, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+            int tmp_lowerLim = get_lower_limits(i); 
+            int tmp_upperLim = get_upper_limits(i); 
+//
+
+
+            void* recvPointer = &cells[0 + tmp_lowerLim*params.nx];
+            int recieveSize = params.nx * abs(tmp_lowerLim- tmp_upperLim);
+
+            MPI_Recv(recvPointer, recieveSize, cells_struct, i, 1, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+
         }
-    } else {
-        int start = rank_data.localY_start;
-        int end = rank_data.localY_end;
-        int size = params.nx * (end - start);
+	// printf("GATHERING DONE \n");
+    }
+    else{
+        // printf("Worker %d sending \n",rank);
 
-        MPI_Ssend(&cells[start * params.nx], size, cells_struct, MASTER, 1, MPI_COMM_WORLD);
+        void* sendbuffer = &cells[0 + rank_data.localY_start*params.nx];
+        int sendSize = params.nx * abs(rank_data.localY_start - rank_data.localY_end);
+
+        MPI_Ssend(sendbuffer, sendSize, cells_struct, 0, 1, MPI_COMM_WORLD);
+
     }
 }
 
@@ -379,6 +384,7 @@ int timestep(const t_param params, t_speed* cells, t_speed* tmp_cells, int* obst
   propagate(params, cells, tmp_cells);
   rebound(params, cells, tmp_cells, obstacles);
   collision(params, cells, tmp_cells, obstacles);
+  haloExchange(params,cells,tmp_cells,obstacles);
   return EXIT_SUCCESS;
 }
 
@@ -678,7 +684,7 @@ float sum_velocity(const t_param params, t_speed* cells, int* obstacles)
                      / local_density;
         /* accumulate the norm of x- and y- velocity components */
         tot_u += sqrtf((u_x * u_x) + (u_y * u_y));
-        /* increase counter of inspected cells */
+        
         ++tot_cells;
       }
       else if(obstacles[ii + jj*params.nx]){
